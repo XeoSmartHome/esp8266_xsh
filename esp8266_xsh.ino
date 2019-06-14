@@ -5,11 +5,12 @@
 */
 
 
-#include <WebSocketsServer.h>
+#include <ArduinoJson.h>
+#include <DNSServer.h>
+#include <ESPAsyncWebServer.h>
+#include <AsyncWebSocket.h>
 #include <TickerScheduler.h>
 #include <FastLED.h>
-#include <ESP8266WebServer.h>
-#include <DNSServer.h>
 #include <ESP8266WiFi.h>
 
 
@@ -21,14 +22,17 @@
 #define MQTT_PORT 1883
 #define MQTT_SSL_PORT 8883
 
+#define WEB_SOCKET_URL "/ws"
+
 #define MQTT_HOST "mqtt.com"
 
 #define BUTTON_LONG_PRESS 4000
 #define BUTTON_SHORT_PRESS 100
 
+// R"()" -> raw literal - google it
 PROGMEM char INDEX_HTML[] = "<!DOCTYPE html>\n<html>\n<head>\n\t<title>XSH</title>\n</head>\n<body>\nSettings Page<br>\n<form action=\"/set_wifi_credentials\" method=\"POST\">\nSSID:<input name=\"ssid\" type=\"text\">\n<br>\nPassword:<input name=\"password\" type=\"text\">\n<br>\n<button type=\"sumbit\">Save</button>\n</form>\n\n</body>\n</html>";
-PROGMEM char JAVASCRIPT_JS[] = "";
-PROGMEM char STYLE_CSS[] = "";
+PROGMEM char JAVASCRIPT_JS[] = R"()";
+PROGMEM char STYLE_CSS[] = R"()";
 
 
 IPAddress accesPointIp(1, 1, 1, 1);
@@ -56,8 +60,8 @@ public:
 protected:
 	CRGB* led;
 	DNSServer* dnsServer;
-	ESP8266WebServer* webServer;
-	WebSocketsServer* webSocketServer;
+	AsyncWebServer* webServer;
+	AsyncWebSocket* webSocketServer;
 
 	void setLedColor(CRGB color);
 
@@ -83,6 +87,8 @@ private:
 	TickerScheduler* taskScheduler;
 	//String scanWiFiNetworks();
 
+	void onFiWiScanRequest();
+
 	void configModeStart();
 	void configModeLoop();
 	void configModeStop();
@@ -97,7 +103,8 @@ private:
 	void onStationModeDHCPTimeout(void); // This event fires when the microcontroller can’t get an IP address, from a timeout or other errors.
 
 	void setWebSocketEventHandlers();
-	void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length);
+	void onWebSocketEvent(AsyncWebSocket* server, AsyncWebSocketClient* client, AwsEventType type, void* arg, uint8_t* data, size_t len);
+	void onWebSocketTextDataEvent(AsyncWebSocket* server, AsyncWebSocketClient* client, String data, size_t len);
 
 };
 
@@ -143,8 +150,8 @@ uint8_t XSH_Device::getButtonPin() {
 void XSH_Device::init() {
 	this->led = new CRGB[1];
 	this->dnsServer = new DNSServer();
-	this->webServer = new ESP8266WebServer(HTTP_PORT);
-	this->webSocketServer = new WebSocketsServer(WEB_SOCKET_PORT);
+	this->webServer = new AsyncWebServer(HTTP_PORT);
+	this->webSocketServer = new AsyncWebSocket(WEB_SOCKET_URL);
 	this->taskScheduler = new TickerScheduler(5);
 }
 
@@ -155,10 +162,6 @@ void XSH_Device::start() {
 	FastLED.addLeds<NEOPIXEL, LED_DATA_PIN>(led, 1);
 	setLedColor(CRGB::Black);
 
-	WiFi.hostname(_name);
-	char *name;
-	_name.toCharArray(name, 128);
-	WiFi.softAP(name);
 	WiFi.softAPConfig(accesPointIp, accesPointIp, NET_MASK);
 	delay(500);
 
@@ -169,6 +172,7 @@ void XSH_Device::start() {
 
 	WiFi.mode(WIFI_STA);
 	WiFi.begin();
+
 }
 
 
@@ -208,28 +212,30 @@ void XSH_Device::configModeStart() {
 
 	dnsServer->setErrorReplyCode(DNSReplyCode::NoError);
 	dnsServer->setTTL(0);
+
 	dnsServer->start(DNS_PORT, "*", accesPointIp);
 	webServer->begin();
+	//webSocketServer->begin();
 }
 
 
 // This event fires up when device is in config mode
 void XSH_Device::configModeLoop() {
 	dnsServer->processNextRequest();
-	webServer->handleClient();
-	webSocketServer->loop();
 }
 
 
-// This event fires up when device close config mode
+// This event fires up when device end config mode
 void XSH_Device::configModeStop() {
 	if (_debug)
 		Serial.println("Stop config mode");
 
 	setLedColor(CRGB::Black);
 
-	webServer->stop();
+	//webServer->stop();
 	dnsServer->stop();
+	//webSocketServer->close();
+
 	WiFi.mode(WIFI_STA);
 }
 
@@ -323,30 +329,30 @@ void XSH_Device::handleButtonLongPress() {
 
 
 void XSH_Device::setWebServerEventHandlers() {
-	webServer->onNotFound([this]() {
-		webServer->sendHeader("Location", "/", true);
-		webServer->send(302, "text/plain", "");
+
+	webServer->onNotFound([this](AsyncWebServerRequest* request) {
+		request->redirect("/");
 	});
 
-	webServer->on("/", HTTP_GET, [this]() {
-		webServer->send_P(200, "text/html", INDEX_HTML);
+	webServer->on("/", HTTP_GET, [this](AsyncWebServerRequest* request) {
+		request->send_P(200, "text/html", INDEX_HTML);
 	});
 
-	webServer->on("/style.css", HTTP_GET, [this]() {
-		webServer->send_P(200, "text/css", STYLE_CSS);
+	webServer->on("/style.css", HTTP_GET, [this](AsyncWebServerRequest* request) {
+		request->send_P(200, "text/html", STYLE_CSS);
 	});
 
-	webServer->on("/javascript.js", HTTP_GET, [this]() {
-		webServer->send_P(200, "text/javascript", JAVASCRIPT_JS);
+	webServer->on("/javascript.js", HTTP_GET, [this](AsyncWebServerRequest* request) {
+		request->send_P(200, "text/html", JAVASCRIPT_JS);
 	});
 
-	webServer->on("/set_wifi_credentials", HTTP_POST, [this]() {
-		if (webServer->hasArg("ssid") && webServer->hasArg("password")) {
-			String ssid = webServer->arg("ssid");
-			String password = webServer->arg("password");
+	webServer->on("/set_wifi_credentials", HTTP_POST, [this](AsyncWebServerRequest* request) {
+		if (request->hasArg("ssid") && request->hasArg("password")) {
+			String ssid = request->arg("ssid");
+			String password = request->arg("password");
 
 			//WiFi.begin(ssid, password);
-			webServer->send(200, "text/html", "ok");
+			request->send(200, "text/html", "ok");
 
 			if (_debug) {
 				Serial.println("SSID set to: " + ssid);
@@ -354,58 +360,170 @@ void XSH_Device::setWebServerEventHandlers() {
 			}
 		}
 		else {
-			webServer->send(400, "text/html", "bad request");
+			request->send(400, "text/html", "bad request");
 		}
 	});
+
+
 }
 
 void XSH_Device::setWebSocketEventHandlers() {
-	webSocketServer->onEvent(this->onWebSocketEvent);
+	webSocketServer->onEvent([this](AsyncWebSocket* server, AsyncWebSocketClient* client, AwsEventType type, void* arg, uint8_t* data, size_t len) {
+		onWebSocketEvent(server, client, type, arg, data, len);
+	});
+	webServer->addHandler(webSocketServer);
 }
 
 
-void XSH_Device::onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
+void XSH_Device::onWebSocketEvent(AsyncWebSocket* server, AsyncWebSocketClient* client, AwsEventType type, void* arg, uint8_t* data, size_t len) {
 
 	switch (type) {
-	case WStype_DISCONNECTED:
-		Serial.printf("[%u] Disconnected!\n", num);
+	case WS_EVT_CONNECT:
+		Serial.printf("ws[%s][%u] connect\n", server->url(), client->id());
+		client->printf("Hello Client %u :)", client->id());
+		client->ping();
 		break;
 
-	case WStype_CONNECTED:
-		IPAddress ip = webSocketServer->remoteIP(num);
-		Serial.printf("[%u] Connected from %d.%d.%d.%d url: %s\n", num, ip[0], ip[1], ip[2], ip[3], payload);
-
-		// send message to client
-		webSocketServer->sendTXT(num, "Connected");
+	case WS_EVT_DISCONNECT:
+		Serial.printf("ws[%s][%u] disconnect: %u\n", server->url(), client->id());
 		break;
 
-	case WStype_TEXT:
-		Serial.printf("[%u] get Text: %s\n", num, payload);
-
-		if(webSocketServer->)
-
+	case WS_EVT_ERROR:
+		Serial.printf("ws[%s][%u] error(%u): %s\n", server->url(), client->id(), *((uint16_t*)arg), (char*)data);
 		break;
 
-	case WStype_BIN:
-		//pass
+	case WS_EVT_PONG:
+		Serial.printf("ws[%s][%u] pong[%u]: %s\n", server->url(), client->id(), len, (len) ? (char*)data : "");
 		break;
 
-		// Fragmentation / continuation opcode handling
-		// case WStype_FRAGMENT_BIN_START:
-	case WStype_FRAGMENT_TEXT_START:
-		//fragmentBuffer = (char*)payload;
-		break;
-	case WStype_FRAGMENT:
-		//fragmentBuffer += (char*)payload;
-		break;
-	case WStype_FRAGMENT_FIN:
-		//fragmentBuffer += (char*)payload;
+	case WS_EVT_DATA:
+		AwsFrameInfo* info = (AwsFrameInfo*)arg;
+		String message = "";
+		if (info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT) { //the whole message is in a single frame and we got all of it's data
+			for (size_t i = 0; i < info->len; i++)
+				message += (char)data[i];
+			onWebSocketTextDataEvent(server, client, message, len);
+		}
 		break;
 	}
 
 }
 
 
+void XSH_Device::onWebSocketTextDataEvent(AsyncWebSocket* server, AsyncWebSocketClient* client, String data, size_t len){
+	DynamicJsonDocument request_doc(2024);
+	deserializeJson(request_doc, data);
+
+	Serial.println(data);
+
+	String event = request_doc["event"];
+	
+	Serial.println(event);
+
+	if (event == "scan_wifi_networks") {
+		onFiWiScanRequest();
+		return;
+	}
+	if (event == "set_wifi_credentials") {
+		const char *ssid = request_doc["ssid"];
+		const char *password = request_doc["password"];
+
+		if (ssid != NULL && password != NULL) {
+			WiFi.begin(ssid, password);
+			client->text("success_message");
+		}
+		return;
+	}
+	if (event == "set_device_name") {
+		const char* name = request_doc["name"];
+
+		if (name != NULL) {
+			WiFi.hostname(name);
+			WiFi.softAP(name);
+
+			client->text("success_message");
+		}
+		return;
+	}
+	if (event == "set_wifi_advenced") {
+		String s_local_ip = request_doc["local_ip"];
+		String s_gate_way = request_doc["gateway"];
+		String s_subnet = request_doc["subnet"];
+
+		if (s_local_ip != NULL && s_gate_way != NULL && s_subnet != NULL) {
+
+			IPAddress local_ip = stringToIpAdress(s_local_ip);
+			IPAddress gateway = stringToIpAdress(s_gate_way);
+			IPAddress subnet = stringToIpAdress(s_subnet);
+
+			WiFi.config(local_ip, gateway, subnet);
+
+			client->text("success_message");
+		}
+		return;
+	}
+
+}
+
+
+void XSH_Device::onFiWiScanRequest() { //scan for available wifi networks and send response to web socket client
+	if (WiFi.scanComplete() != WIFI_SCAN_RUNNING) {
+		WiFi.scanNetworksAsync([&](int networks) {
+			DynamicJsonDocument doc(2024);
+			doc["event"] = "scan_wifi_networks";
+
+			String ssid;
+			uint8_t encryptionType;
+			int32_t rssi;
+			uint8_t* bssid;
+			int32_t channel;
+			bool isHidden;
+
+			JsonArray ssidArray = doc.createNestedArray("ssid");
+			JsonArray encryptionTypeArray = doc.createNestedArray("encryption_type");
+			JsonArray rssiArray = doc.createNestedArray("rssi");
+			JsonArray bssidArray = doc.createNestedArray("bssid");
+			JsonArray chanelArray = doc.createNestedArray("chanel");
+			JsonArray isHidenArray = doc.createNestedArray("is_hiden");
+
+			for (int this_network = 0; this_network < networks; this_network++) {
+				WiFi.getNetworkInfo(this_network, ssid, encryptionType, rssi, bssid, channel, isHidden);
+				ssidArray.add(ssid);
+				/*
+				Function returns a number that encodes encryption type as follows:
+				* 5 : ENC_TYPE_WEP - WEP 
+				* 2 : ENC_TYPE_TKIP - WPA / PSK 
+				* 4 : ENC_TYPE_CCMP - WPA2 / PSK 
+				* 7 : ENC_TYPE_NONE - open network 
+				* 8 : ENC_TYPE_AUTO - WPA / WPA2 / PSK
+				*/
+				encryptionTypeArray.add(encryptionType);
+				rssiArray.add(rssi);
+				//bssidArray.add(bssid); // TODO: transform mac adress from pointer to string
+				chanelArray.add(channel);
+				isHidenArray.add(isHidden);
+			}
+
+			String response;
+			serializeJson(doc, response);
+			//Serial.println(response);
+
+			webSocketServer->textAll(response);
+		}, true);
+	}
+}
+
+
+IPAddress stringToIpAdress(const char *string) {
+	unsigned short a, b, c, d;
+	sscanf(string, "%hu.%hu.%hu.%hu", &a, &b, &c, &d);
+	return IPAddress(a, b, c, d);
+}
+
+
+IPAddress stringToIpAdress(String string) {
+	return stringToIpAdress(string.c_str());
+}
 
 
 
@@ -414,6 +532,7 @@ XSH_Device device;
 
 // the setup function runs once when you press reset or power the board
 void setup() {
+	Serial.begin(115200);
 	device.init();
 	device.start();
 }

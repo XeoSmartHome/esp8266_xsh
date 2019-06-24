@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<title>Xeo SmartHome</title>
+		<link rel="stylesheet" href="bootstrap.min.css">
+	</head>
+	<body>
+  		<div class="container">
+    		<div class="row">
+      			<div class="col-sm-9 col-md-7 col-lg-5 mx-auto">
+        			<div class="card card-signin my-5">
+						<br>
+						<h4 align="center" class="card-title">Welcome to Xeo Smart Home settings page</h4>
+						<hr>
+          				<div class="card-body">
+							<h3>Connect to WiFi</h3>
+							<p>Search for your WiFi network and select it from list. Or  enter its name manually.</p>
+							<button id="scan_button" class="btn btn-sm btn-success">Search for WiFi networks</button>
+							<hr>
+							<span id="wifi_list"></span>
+							<hr>
+							<input id="ssid" type="text" class="form-control" placeholder="WiFi network">
+							<br>
+							<input id="password" type="password" class="form-control" placeholder="WiFi password">
+							<br>
+							<button id="set_wifi_credentials" class="btn btn-primary">Connect to WiFi</button>
+
+							<button class="btn btn-secondary" data-toggle="collapse" data-target="#ce" aria-expanded="false" aria-controls="ce">Advanced</button>
+							<div class="collapse" id="ce">
+								<hr>
+								<h5>Manual IP address configuration</h5>
+								<br>
+								<input id="local_ip" type="text" class="form-control" placeholder="IP address">
+								<br>
+								<input id="gateway" type="text" class="form-control" placeholder="Gateway">
+								<br>
+								<input id="subnet" type="text" class="form-control" placeholder="Subnet mask">
+								<br>
+								<button id="set_manual_ip" class="btn btn-primary">Save changes</button>
+							</div>
+							<hr>
+							<h3>Device name</h3>
+							<p>Set a custom device name. <b>The change will apply after device reboot.</b></p>
+							<input id="device_name" type="text" class="form-control" placeholder="Device name">
+							<br>
+							<button id="set_device_name" class="btn btn-primary">Change device name</button>
+							<hr>
+							<button id="reboot_button" class="btn btn-danger">Reboot device</button>
+						</div>
+       				 </div>
+      			</div>
+    		</div>
+  		</div>
+		<script src="javascript.js"></script>
+		<script src="jquery.min.js"></script>
+		<script src="popper.min.js"></script>
+		<script src="bootstrap.min.js"></script>
+	</body>
+</html>

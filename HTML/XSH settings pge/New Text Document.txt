@@ -1,0 +1,3 @@
+{"event":"scan_wifi_networks","ssid":["Paltinis2","UPC Wi-Free"],"encryption_type":[8,255],"rssi":[-80,-80],"bssid":[],"chanel":[11,11],"is_hiden":[false,false]}
+{"event":"set_device_name","status":1}
+{"event":"set_wifi_advenced","status":0}

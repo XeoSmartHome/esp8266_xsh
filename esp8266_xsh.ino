@@ -68,10 +68,15 @@ public:
 protected:
 	void setLedColor(CRGB color);
 
+	// send mqtt message to cloud
+	void sendMessage(const char* message);
+	void sendMessage(String* message);
+
 	// derivable methods:
-	void handleButtonShortPress() {};
-	void onStart() {};
-	void onLoop() {};
+	virtual void onButtonShortPress() = 0;
+	virtual void onStart() = 0;
+	virtual void onLoop() = 0;
+	virtual void onMessage(char* payload, size_t len) = 0;
 
 private:
 	CRGB* led;
@@ -180,20 +185,6 @@ uint8_t XSH_Device::getButtonPin() {
 }
 
 
-void XSH_Device::loadSettings() {
-	EEPROM.begin(1024);
-	EEPROM.get(0, _settings);
-	EEPROM.end();
-}
-
-
-void XSH_Device::saveSettings(){
-	EEPROM.begin(1024);
-	EEPROM.put(0, _settings);
-	EEPROM.end();
-}
-
-
 void XSH_Device::init() {
 	this->led = new CRGB[1];
 	this->dnsServer = new DNSServer();
@@ -232,6 +223,8 @@ void XSH_Device::start() {
 		WiFi.config(_settings.local_ip, _settings.gateway, _settings.subnet_mask, _settings.gateway);
 	}
 	WiFi.begin();
+
+	onStart();
 }
 
 
@@ -240,12 +233,13 @@ void XSH_Device::loop() {
 	if (_config_mode_on)
 		configModeLoop();
 
+	onLoop();
 	taskScheduler->update();
-
 }
 
 
 // PROTECTED: -------------------------------------------------------------------------------------------------------------------------------------
+
 
 void XSH_Device::setLedColor(CRGB color) {
 	led[0] = color;
@@ -253,8 +247,32 @@ void XSH_Device::setLedColor(CRGB color) {
 }
 
 
+void XSH_Device::sendMessage(const char* message) {
+	mqttClient->publish("", 2, false, message);
+	// TODO: set topic
+};
+
+
+void XSH_Device::sendMessage(String* message) {
+	sendMessage(message->c_str());
+}
+
 
 // PRIVATE: ---------------------------------------------------------------------------------------------------------------------------------------
+
+
+void XSH_Device::loadSettings() {
+	EEPROM.begin(1024);
+	EEPROM.get(0, _settings);
+	EEPROM.end();
+}
+
+
+void XSH_Device::saveSettings() {
+	EEPROM.begin(1024);
+	EEPROM.put(0, _settings);
+	EEPROM.end();
+}
 
 
 // This event fires up when device begin config mode
@@ -297,9 +315,7 @@ void XSH_Device::configModeStop() {
 	setLedColor(CRGB::Black);
 	taskScheduler->remove(TASK_SCHEDULER_LED);
 
-	//webServer->stop();
 	dnsServer->stop();
-	//webSocketServer->close();
 
 	WiFi.mode(WIFI_STA);
 }
@@ -334,19 +350,24 @@ void XSH_Device::onStationModeConnected(const WiFiEventStationModeConnected& eve
 void XSH_Device::onStationModeDisconnected(const WiFiEventStationModeDisconnected& event) {
 	Serial.println("Disconncted from: " + event.ssid);
 	mqttClient->disconnect();
+	if (_config_mode_on) {
+		webSocketServer->textAll(R"({"event":"wifi_disconnected"})");
+	}
 }
 
 
 // Fires up when the chip can’t log in with previously saved credentials.
 void XSH_Device::onStationModeAuthModeChanged(const WiFiEventStationModeAuthModeChanged& event) {
-
+	if (_config_mode_on) {
+		webSocketServer->textAll(R"({"event":"wifi_auth_fail"})");
+	}
 }
 
 
 // This event fires up when the chip gets to its final step of the connection: getting is network IP address.
 void XSH_Device::onStationModeGotIP(const WiFiEventStationModeGotIP& event) {
 	if (_config_mode_on) {
-		webSocketServer->textAll(R"({"event":"wifi_status"},"status":)");
+		webSocketServer->textAll(R"({"event":"wifi_connected"})");
 		mqttClient->connect();
 	}else{
 		setLedColor(CRGB::Green);
@@ -361,7 +382,9 @@ void XSH_Device::onStationModeGotIP(const WiFiEventStationModeGotIP& event) {
 
 // This event fires when the microcontroller can’t get an IP address, from a timeout or other errors.
 void XSH_Device::onStationModeDHCPTimeout() {
-
+	if (_config_mode_on) {
+		webSocketServer->textAll(R"({"event":"wifi_dhcp_error"})");
+	}
 }
 
 
@@ -386,7 +409,7 @@ void  XSH_Device::checkForButtonStateChanges() {
 		_button_last_state = false;
 		unsigned long press_time = millis() - _button_press_moment;
 		if (BUTTON_SHORT_PRESS < press_time && press_time < BUTTON_LONG_PRESS)
-			handleButtonShortPress();
+			onButtonShortPress();
 	}
 }
 
@@ -519,8 +542,9 @@ void XSH_Device::onWebSocketTextDataEvent(AsyncWebSocket* server, AsyncWebSocket
 			WiFi.config(local_ip, gateway, subnet);
 
 			response_doc["status"] = SUCCESS;
-		}else
+		} else {
 			response_doc["status"] = FAIL;
+		}
 	}
 	else
 	if (event == "reboot_device") {
@@ -612,8 +636,14 @@ void XSH_Device::setMqttEventHandlers() {
 
 
 void XSH_Device::onMqttConnect(bool sessionPresent) {
-	//setLedColor(CRGB::Green);
-	//mqttClient->subscribe("claudiu", 2);
+	if (!_config_mode_on){
+		setLedColor(CRGB::Purple);
+		taskScheduler->add(TASK_SCHEDULER_LED, 1000, [this](void*) {
+			setLedColor(CRGB::Black);
+			taskScheduler->remove(TASK_SCHEDULER_LED);
+		}, nullptr, false);
+	}
+
 	mqttClient->publish("claudiu", 2, true, "hello from ESP8266");
 }
 
@@ -634,7 +664,7 @@ void XSH_Device::onMqttUnsubscribe(uint16_t packetId) {
 
 
 void XSH_Device::onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total) {
-	Serial.println(payload);
+	onMessage(payload, len);
 }
 
 
@@ -658,8 +688,23 @@ IPAddress stringToIpAdress(String string) {
 
 
 
-XSH_Device device;
+class MyDevice : public XSH_Device {
+	// Inherited via XSH_Device
+	virtual void onStart() override{
 
+	}
+	virtual void onLoop() override{
+		
+	}
+	virtual void onMessage(char* payload, size_t len) override{
+
+	}
+	virtual void onButtonShortPress() override{
+
+	}
+};
+
+MyDevice device;
 
 // the setup function runs once when you press reset or power the board
 void setup() {

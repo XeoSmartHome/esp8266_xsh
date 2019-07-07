@@ -697,7 +697,7 @@ class MyDevice : public XSH_Device {
 		
 	}
 	virtual void onMessage(char* payload, size_t len) override{
-
+		
 	}
 	virtual void onButtonShortPress() override{
 

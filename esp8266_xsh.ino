@@ -4,6 +4,7 @@
  Author:	Claudiu Neamtu
 */
 
+#include <Servo.h>
 #include <FS.h>
 #include <EEPROM.h>
 #include <AsyncMqttClient.h>
@@ -29,7 +30,7 @@
 #else*/
 #define MQTT_PORT 1883
 //#endif
-#define MQTT_SERVER_URL "broker.hivemq.com"
+#define MQTT_SERVER_URL "xeosmarthome.ml"
 
 #define WEB_SOCKET_URL "/ws"
 
@@ -51,6 +52,9 @@ class XSH_Device {
 public:
 	XSH_Device();
 	~XSH_Device();
+
+	void setSerial(const String name);
+	String getSerial();
 
 	void setName(const String name);
 	String getName();
@@ -76,7 +80,8 @@ protected:
 	virtual void onButtonShortPress() = 0;
 	virtual void onStart() = 0;
 	virtual void onLoop() = 0;
-	virtual void onMessage(char* payload, size_t len) = 0;
+	virtual void onAction(DynamicJsonDocument& doc) = 0;
+	virtual void onScheduleUpdate(DynamicJsonDocument& doc) = 0;
 
 private:
 	CRGB* led;
@@ -84,8 +89,11 @@ private:
 	AsyncWebServer* webServer;
 	AsyncWebSocket* webSocketServer;
 	AsyncMqttClient* mqttClient;
+	TickerScheduler* taskScheduler;
 
 	bool _debug = true;
+
+	String _serial = "";
 
 	struct Settings{
 		bool dhcp;
@@ -110,8 +118,6 @@ private:
 	bool buttonIsPressed();
 	void checkForButtonStateChanges();
 	void handleButtonLongPress();
-
-	TickerScheduler* taskScheduler;
 
 	// Config mode
 	bool _config_mode_on = false;
@@ -153,6 +159,16 @@ XSH_Device::XSH_Device() {}
 
 
 XSH_Device::~XSH_Device() {}
+
+
+void XSH_Device::setSerial(const String serial) {
+	this->_serial = serial;
+};
+
+
+String XSH_Device::getSerial() {
+	return this->_serial;
+};
 
 
 void XSH_Device::setName(const String name) {
@@ -644,7 +660,7 @@ void XSH_Device::onMqttConnect(bool sessionPresent) {
 		}, nullptr, false);
 	}
 
-	mqttClient->publish("claudiu", 2, true, "hello from ESP8266");
+	mqttClient->subscribe((String("devices/") + _serial).c_str(), 2);
 }
 
 
@@ -664,7 +680,19 @@ void XSH_Device::onMqttUnsubscribe(uint16_t packetId) {
 
 
 void XSH_Device::onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total) {
-	onMessage(payload, len);
+	payload[len] = 0;
+
+	DynamicJsonDocument doc(4096);
+	deserializeJson(doc, payload);
+
+	String event = doc["event"];
+
+	if (event == "action") {
+		onAction(doc);
+	}
+	else if (event == "schedule_update") {
+		onScheduleUpdate(doc);
+	}
 }
 
 
@@ -687,20 +715,57 @@ IPAddress stringToIpAdress(String string) {
 }
 
 
+Servo servo_1;
+const int servo_1_pin = D7;
+TickerScheduler myTaskScheduler(2);
+bool feeding = false;
+
 
 class MyDevice : public XSH_Device {
 	// Inherited via XSH_Device
-	virtual void onStart() override{
-
-	}
-	virtual void onLoop() override{
-		
-	}
-	virtual void onMessage(char* payload, size_t len) override{
-		
-	}
 	virtual void onButtonShortPress() override{
+	}
 
+	virtual void onStart() override{
+		servo_1.attach(servo_1_pin);
+		servo_1.write(0);
+		delay(1000);
+		servo_1.detach();
+	}
+
+	virtual void onLoop() override{
+		myTaskScheduler.update();
+	}
+
+	virtual void onAction(DynamicJsonDocument& doc) override{
+		String action = doc["action"];
+		if (action == "feed") {
+			const int amount = doc["amount"];
+			feed();
+		}
+	}
+
+	void feed() {
+		if (!feeding) {
+			servo_1.attach(servo_1_pin);
+			servo_1.write(90);
+			feeding = true;
+			myTaskScheduler.add(0, 1000, [this](void*) {
+				servo_1.write(0);
+			}, nullptr, false);
+
+			myTaskScheduler.add(1, 2000, [this](void*) {
+				servo_1.detach();
+				myTaskScheduler.remove(1);
+				feeding = false;
+			}, nullptr, false);
+		}
+		
+	}
+
+	virtual void onScheduleUpdate(DynamicJsonDocument& doc) override{
+		String schedule = doc["schedule"];
+		Serial.println(schedule);
 	}
 };
 
@@ -709,6 +774,7 @@ MyDevice device;
 // the setup function runs once when you press reset or power the board
 void setup() {
 	Serial.begin(115200);
+	device.setSerial("1234567890");
 	device.init();
 	device.start();
 }

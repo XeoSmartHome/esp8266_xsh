@@ -4,6 +4,7 @@
  Author:	Claudiu Neamtu
 */
 
+//#include <NtpClientLib.h>
 #include <Servo.h>
 #include <FS.h>
 #include <EEPROM.h>
@@ -31,6 +32,7 @@
 #define MQTT_PORT 1883
 //#endif
 #define MQTT_SERVER_URL "xeosmarthome.ml"
+#define MQTT_PING_TIMEOUT 50000  // 50 * 1000 misiseconds
 
 #define WEB_SOCKET_URL "/ws"
 
@@ -42,7 +44,10 @@
 #define FAIL 0
 
 #define TASK_SCHEDULER_LED 0
+#define TASK_SCHEDULER_MQTT_PING 1
 
+#define NTP_SERVER_URL "europe.pool.ntp.org"
+#define TIME_ZONE 2
 
 IPAddress accesPointIp(1, 1, 1, 1);
 IPAddress NET_MASK(255, 255, 255, 0);
@@ -80,8 +85,8 @@ protected:
 	virtual void onButtonShortPress() = 0;
 	virtual void onStart() = 0;
 	virtual void onLoop() = 0;
-	virtual void onAction(DynamicJsonDocument& doc) = 0;
-	virtual void onScheduleUpdate(DynamicJsonDocument& doc) = 0;
+	virtual void onAction(JsonObject& action) = 0;
+	virtual void onScheduleUpdate(JsonArray& actions) = 0;
 
 private:
 	CRGB* led;
@@ -366,6 +371,7 @@ void XSH_Device::onStationModeConnected(const WiFiEventStationModeConnected& eve
 void XSH_Device::onStationModeDisconnected(const WiFiEventStationModeDisconnected& event) {
 	Serial.println("Disconncted from: " + event.ssid);
 	mqttClient->disconnect();
+	//NTP.stop();
 	if (_config_mode_on) {
 		webSocketServer->textAll(R"({"event":"wifi_disconnected"})");
 	}
@@ -393,6 +399,7 @@ void XSH_Device::onStationModeGotIP(const WiFiEventStationModeGotIP& event) {
 			taskScheduler->remove(TASK_SCHEDULER_LED);
 		}, nullptr, false);
 	}
+	//NTP.begin(NTP_SERVER_URL, TIME_ZONE, true, 0);
 }
 
 
@@ -445,9 +452,9 @@ void XSH_Device::handleButtonLongPress() {
 
 void XSH_Device::setWebServerEventHandlers() {
 
-	webServer->onNotFound([this](AsyncWebServerRequest* request) {
+	/*webServer->onNotFound([this](AsyncWebServerRequest* request) {
 		request->redirect("/");
-	});
+	});*/
 
 	webServer->serveStatic("/", SPIFFS, "/").setDefaultFile("index.html").setCacheControl("max-age=600");
 }
@@ -637,7 +644,9 @@ void XSH_Device::setMqttEventHandlers() {
 		onMqttUnsubscribe(packetId);
 	});
 	mqttClient->onMessage([this](char* topic, char* payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total) {
+		//setLedColor(CRGB::Yellow);
 		onMqttMessage(topic, payload, properties, len, index, total);
+		//setLedColor(CRGB::Black);
 	});
 	mqttClient->onPublish([this](int16_t packetId) {
 		onMqttPublish(packetId);
@@ -661,6 +670,9 @@ void XSH_Device::onMqttConnect(bool sessionPresent) {
 	}
 
 	mqttClient->subscribe((String("devices/") + _serial).c_str(), 2);
+	this->taskScheduler->add(TASK_SCHEDULER_MQTT_PING, MQTT_PING_TIMEOUT, [this](void*) {
+		mqttClient->publish((String("devices/") + _serial).c_str(), 2, false, "ping");
+	}, nullptr, false);
 }
 
 
@@ -688,10 +700,12 @@ void XSH_Device::onMqttMessage(char* topic, char* payload, AsyncMqttClientMessag
 	String event = doc["event"];
 
 	if (event == "action") {
-		onAction(doc);
+		JsonObject action = doc["action"].as<JsonObject>();
+		onAction(action);
 	}
 	else if (event == "schedule_update") {
-		onScheduleUpdate(doc);
+		JsonArray actions = doc["schedule"].as<JsonArray>();
+		onScheduleUpdate(actions);
 	}
 }
 
@@ -715,57 +729,49 @@ IPAddress stringToIpAdress(String string) {
 }
 
 
-Servo servo_1;
-const int servo_1_pin = D7;
-TickerScheduler myTaskScheduler(2);
-bool feeding = false;
-
-
 class MyDevice : public XSH_Device {
 	// Inherited via XSH_Device
 	virtual void onButtonShortPress() override{
 	}
 
 	virtual void onStart() override{
-		servo_1.attach(servo_1_pin);
-		servo_1.write(0);
-		delay(1000);
-		servo_1.detach();
 	}
 
 	virtual void onLoop() override{
-		myTaskScheduler.update();
 	}
 
-	virtual void onAction(DynamicJsonDocument& doc) override{
-		String action = doc["action"];
-		if (action == "feed") {
-			const int amount = doc["amount"];
-			feed();
-		}
-	}
+	virtual void onAction(JsonObject& action) override{
+		int red = 0;
+		int green = 0;
+		int blue = 0;
+		const char* action_name = action["name"];
+		if (strcmp(action_name, "Set Color") != 0)
+			return;
 
-	void feed() {
-		if (!feeding) {
-			servo_1.attach(servo_1_pin);
-			servo_1.write(90);
-			feeding = true;
-			myTaskScheduler.add(0, 1000, [this](void*) {
-				servo_1.write(0);
-			}, nullptr, false);
+		JsonArray parameters = action["parameters"].as<JsonArray>();
+		for (JsonObject parameter : parameters) {
+			const String parameter_name = parameter["name"];
+			int value = parameter["value"];
 
-			myTaskScheduler.add(1, 2000, [this](void*) {
-				servo_1.detach();
-				myTaskScheduler.remove(1);
-				feeding = false;
-			}, nullptr, false);
+			if (parameter_name == "red") {
+				red = value;
+			}
+			else if (parameter_name == "green") {
+				green = value;
+			}
+			else if (parameter_name == "blue") {
+				blue = value;
+			}
 		}
+		Serial.println(red);
+		Serial.println(green);
+		Serial.println(blue);
+		setLedColor(CRGB(red, green, blue));
 		
 	}
 
-	virtual void onScheduleUpdate(DynamicJsonDocument& doc) override{
-		String schedule = doc["schedule"];
-		Serial.println(schedule);
+	virtual void onScheduleUpdate(JsonArray& actions) override{
+		
 	}
 };
 
